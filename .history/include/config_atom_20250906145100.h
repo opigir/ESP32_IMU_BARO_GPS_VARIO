@@ -1,5 +1,5 @@
-#ifndef CONFIG_H_
-#define CONFIG_H_
+#ifndef CONFIG_ATOM_H_
+#define CONFIG_ATOM_H_
 
 #include "sdkconfig.h"
 #include "driver/gpio.h"
@@ -16,15 +16,11 @@
 #define I2C_SCL_PIN     21  // M5Stack Atom Lite protoboard pin
 #define I2C_FREQ_HZ     100000
 
-// GPS UART configuration for BZ-121 GPS (M10 chip)
-// BZ-121 specs: 5V power, 115200 baud, 10Hz default, multi-constellation
+// GPS UART configuration (connect to available GPIO pins)
 #define pinGpsTXD       19  // Connect to GPS RX
 #define pinGpsRXD       23  // Connect to GPS TX
-#define pinGpsRTS       UART_PIN_NO_CHANGE  // Not used
-#define pinGpsCTS       UART_PIN_NO_CHANGE  // Not used
 #define GPS_UART_NUM    UART_NUM_1
-#define GPS_BAUD_RATE   115200  // BZ-121 uses 115200 baud (not 9600)
-#define UART_RX_BUFFER_SIZE   512  // Larger buffer for 10Hz multi-constellation data
+#define UART_RX_BUFFER_SIZE   256
 
 // Button configuration (built-in button on Atom Lite)
 #define pinBtn0         39  // Built-in button (input only, no pullup)
@@ -87,75 +83,5 @@
 
 // Minimal build - remove complex features
 #define MINIMAL_BUILD
-
-// Flash logging types (for GPS module compatibility)
-#define LOGTYPE_NONE    0
-#define LOGTYPE_IBG     1
-#define LOGTYPE_GPS     2
-
-// Stub options structure for GPS module compatibility
-typedef struct {
-    struct {
-        int logType;
-        int trackIntervalSecs;
-        int utcOffsetMins;
-    } misc;
-} OPTIONS;
-
-// Global variables stubs for minimal build
-extern OPTIONS opt;
-extern SemaphoreHandle_t FlashLogMutex;
-extern bool IsGpsTrackActive;
-extern bool IsLoggingIBG;
-
-// Flash log structures (stubs for GPS compatibility)
-typedef struct {
-    struct {
-        int magic;
-        int gpsFlags;
-        int baroFlags;
-    } hdr;
-    struct {
-        int timeOfWeekmS;
-        int heightMSLmm;
-        int vertAccuracymm;
-        int velNorthmmps;
-        int velEastmmps;
-        int velDownmmps;
-        int velAccuracymmps;
-        int lonDeg7;
-        int latDeg7;
-    } gps;
-    struct {
-        int heightMSLcm;
-    } baro;
-} FLASHLOG_IBG_RECORD;
-
-typedef struct {
-    struct {
-        int magic;
-        int fixType;
-        int numSV;
-    } hdr;
-    struct {
-        int posDOP;
-        int utcYear, utcMonth, utcDay;
-        int utcHour, utcMinute, utcSecond;
-        int nanoSeconds;
-        int heightMSLmm;
-        int lonDeg7, latDeg7;
-    } trkpt;
-} FLASHLOG_GPS_RECORD;
-
-extern FLASHLOG_IBG_RECORD FlashLogIBGRecord;
-extern FLASHLOG_GPS_RECORD FlashLogGPSRecord;
-
-// Flash logging function stubs
-int flashlog_writeIBGRecord(FLASHLOG_IBG_RECORD* record);
-void flashlog_writeGPSRecord(FLASHLOG_GPS_RECORD* record);
-
-// Additional constants for GPS module
-#define FLASHLOG_IBG_MAGIC    0x12345678
-#define FLASHLOG_GPS_MAGIC    0x87654321
 
 #endif

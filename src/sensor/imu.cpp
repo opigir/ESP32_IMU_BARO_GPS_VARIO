@@ -1,6 +1,10 @@
 #include "common.h"
 #include <math.h>
+#ifdef ATOM_LITE_BUILD
+#include "config_atom.h"
+#else
 #include "config.h"
+#endif
 #include "imu.h"
 
 static const char* TAG = "imu";

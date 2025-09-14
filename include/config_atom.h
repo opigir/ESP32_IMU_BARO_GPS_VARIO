@@ -1,5 +1,5 @@
-#ifndef CONFIG_H_
-#define CONFIG_H_
+#ifndef CONFIG_ATOM_H_
+#define CONFIG_ATOM_H_
 
 #include "sdkconfig.h"
 #include "driver/gpio.h"
@@ -73,6 +73,15 @@
 
 // MS5611 altitude noise variance (measured offline)
 #define KF_Z_MEAS_VARIANCE            200
+#define KF_A_MEAS_VARIANCE            5.0f   // Trust accelerometer more (was 10.0f)
+#define KF_ACCELBIAS_VARIANCE         0.01f  // Allow bias to adapt faster (was 0.005f)
+
+// Debug configuration - uncomment to enable specific debug modes
+// #define DEBUG_ALL_LOGS              // Enable all debug messages
+// #define DEBUG_FUSION_ONLY              // Enable only fusion debug messages (disabled by default)
+
+// Sensor fusion options
+// #define USE_SIMPLE_FUSION            // Use simplified fusion instead of full Kalman filter
 
 // Sensor I2C addresses for GY-86
 #define MPU6050_I2C_ADDR    0x68
@@ -153,9 +162,5 @@ extern FLASHLOG_GPS_RECORD FlashLogGPSRecord;
 // Flash logging function stubs
 int flashlog_writeIBGRecord(FLASHLOG_IBG_RECORD* record);
 void flashlog_writeGPSRecord(FLASHLOG_GPS_RECORD* record);
-
-// Additional constants for GPS module
-#define FLASHLOG_IBG_MAGIC    0x12345678
-#define FLASHLOG_GPS_MAGIC    0x87654321
 
 #endif

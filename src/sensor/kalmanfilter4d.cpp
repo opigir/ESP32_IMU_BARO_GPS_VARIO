@@ -1,6 +1,10 @@
 #include "common.h"
 #include <math.h>
+#ifdef ATOM_LITE_BUILD
+#include "config_atom.h"
+#else
 #include "config.h"
+#endif
 #include "kalmanfilter4d.h"
 
 static const char* TAG = "kalmanfilter4d";
@@ -55,6 +59,10 @@ static float ABiasVariance;
 static float ZMeasVariance; //  altitude measurement noise variance
 static float AMeasVariance; //  acceleration measurement noise variance
 
+// External runtime parameters (defined in main.cpp)
+extern float accelMeasVariance;
+extern float accelBiasVariance;
+
 // Adaptive uncertainty injection factor to allow for faster response in
 // high acceleration/deceleration situations
 static float KAdapt;
@@ -71,8 +79,8 @@ static float KAdapt;
 
 void kalmanFilter4d_configure(float aVariance,  float kAdapt, float zInitial, float vInitial, float aInitial){
 	ZMeasVariance = KF_Z_MEAS_VARIANCE;
-	AMeasVariance = KF_A_MEAS_VARIANCE;
-    ABiasVariance = KF_ACCELBIAS_VARIANCE;
+	AMeasVariance = accelMeasVariance;    // Use runtime parameter
+    ABiasVariance = accelBiasVariance;    // Use runtime parameter
 	AccelVariance = aVariance;
 	KAdapt = kAdapt;
 
@@ -197,7 +205,7 @@ void kalmanFilter4d_update(float zm, float am, float* pz, float* pv) {
 	s11 += (KAdapt*accel_ext*accel_ext);
 
 	// allow system to update acceleration sensor bias estimate only when there is low acceleration
-	ABiasVariance = KF_ACCELBIAS_VARIANCE/(1.0f + accel_ext);	
+	ABiasVariance = accelBiasVariance/(1.0f + accel_ext);	
 
 	// Compute S_k_inv
 	float sdetinv = 1.0f/(s00*s11 - s10*s01);

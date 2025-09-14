@@ -2,11 +2,18 @@
 #include <math.h>
 #include <driver/uart.h>
 #include "config.h"
-#include "drv/cct.h"
-#include "nv/flashlog.h"
-#include "nv/options.h"
-#include "ui/ui.h"
+// Minimal build - exclude complex dependencies
+// #include "drv/cct.h"
+// #include "nv/flashlog.h"
+// #include "nv/options.h"
+// #include "ui/ui.h"
 #include "sensor/gps.h"
+
+// Minimal build stubs for GPS module
+uint32_t cct_setMarker() { return micros(); }
+uint32_t cct_elapsedUs(uint32_t marker) { return micros() - marker; }
+uint32_t cct_intervalUs(uint32_t start, uint32_t end) { return end - start; }
+// ESP logging macros are already defined by Arduino framework
 
 static const char* TAG = "gps";
 

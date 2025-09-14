@@ -1,0 +1,199 @@
+# ESP32 Bluetooth Pressure Sensor + GPS (M5Stack Atom Lite + GY-86)
+
+A streamlined version of the ESP32 GPS Altimeter Variometer specifically designed for M5Stack Atom Lite + GY-86 sensor board, optimized for Bluetooth integration with phone apps like XCTrack.
+
+## Hardware Requirements
+
+### M5Stack Atom Lite
+- ESP32-PICO-D4 chip with integrated WiFi/Bluetooth
+- Compact 24×24mm development board
+- Built-in RGB LED (GPIO 27)
+- Built-in button (GPIO 39)
+- Grove connector for I2C
+
+### GY-86 10DOF Sensor Board
+- **MPU6050**: 3-axis accelerometer + 3-axis gyroscope
+- **MS5611**: High-precision barometric pressure sensor
+- **HMC5883L**: 3-axis magnetometer (accessed via MPU6050 bypass)
+- **I2C Interface**: All sensors accessible via I2C
+
+### BZ-121 GPS Module
+- **Chip**: u-blox M10 (10th generation)
+- **Power**: 5V (requires level conversion or 5V-tolerant pins)
+- **Baud Rate**: 115200 (default)
+- **Update Rate**: 10Hz (default, configurable 1-10Hz)
+- **Multi-Constellation**: GPS, GLONASS, BeiDou, Galileo, SBAS, QZSS
+- **Size**: 12×16×4.6mm, Weight: 2.4g
+
+## Wiring Connections
+
+### GY-86 to M5Stack Atom Lite 
+```
+GY-86    M5Stack Atom
+VCC   -> 3.3V (Red wire)
+GND   -> GND (Black wire)  
+SDA   -> GPIO 19 (White wire)
+SCL   -> GPIO 22 (Yellow wire)
+```
+
+### BZ-121 GPS to M5Stack Atom Lite
+```
+BZ-121   M5Stack Atom
+VCC   -> 5V (or 3.3V - see note below)
+GND   -> GND
+TX    -> GPIO 23 (RX)
+RX    -> GPIO 19 (TX)
+```
+
+**Important Power Note**: The BZ-121 GPS is specified for 5V power, but many GPS modules work fine at 3.3V with reduced performance. The ESP32 GPIO pins are 5V tolerant for input, so the GPS TX → ESP32 RX connection is safe. For best performance, use 5V power if available, or test with 3.3V first.
+
+### Voltage Monitor (Optional)
+```
+Voltage Divider -> GPIO 33 (ADC input)
+```
+
+## Software Features
+
+### Core Functionality
+- **Bluetooth NMEA**: Transmits LK8EX1 or XCTRC sentences at 1-10Hz
+- **Pressure Altitude**: MS5611 barometric pressure sensor with Kalman filtering
+- **GPS Integration**: NMEA parsing for position, time, speed, and course
+- **Climb Rate**: Real-time vertical speed calculation in cm/s
+- **Phone Integration**: Compatible with XCTrack, LK8000, and other flight apps
+
+### Bluetooth Message Formats
+
+#### LK8EX1 (LK8000 format)
+```
+$LK8EX1,pressure,altitude,vario,temperature,battery*checksum
+```
+- Focus on pressure altitude and climb rate
+- Best for basic variometer function
+
+#### XCTRC (XCSoar format) 
+```
+$XCTRC,year,month,day,hour,minute,second,centisecond,latitude,longitude,
+altitude,speedoverground,course,climbrate,res,res,res,rawpressure,batteryindication*checksum
+```
+- Full GPS integration with date/time
+- Best for navigation and track logging
+
+## Build Instructions
+
+### PlatformIO Setup
+1. Copy `platformio_atom.ini` to `platformio.ini`
+2. Install PlatformIO libraries:
+   ```bash
+   pio lib install "adafruit/Adafruit MPU6050"
+   pio lib install "adafruit/Adafruit MS5611" 
+   pio lib install "adafruit/Adafruit HMC5883 Unified"
+   pio lib install "adafruit/Adafruit Unified Sensor"
+   ```
+
+### Build and Upload
+```bash
+# Build firmware
+pio run
+
+# Upload to M5Stack Atom Lite
+pio run -t upload -t monitor
+```
+
+### Configuration
+- Copy `include/config_atom.h` to `include/config.h`
+- Modify pin assignments if needed
+- Set timezone offset in `UTC_OFFSET_MINS_DEFAULT`
+
+## Usage
+
+### Bluetooth Pairing
+1. Power on the device
+2. Look for "ESP32-BT-Vario-Atom" in Bluetooth settings
+3. Pair with your phone
+
+### Phone App Configuration
+
+#### XCTrack Setup
+1. Settings → Sensors → External sensors
+2. Enable "Use external barometer" 
+3. Enable "Use external GPS" (for XCTRC mode)
+4. Select Bluetooth device
+5. Choose message format (LK8 or XCT)
+
+#### Message Type Switching
+- Press the built-in button to toggle between LK8EX1 and XCTRC formats
+- LED indicates current mode (if implemented)
+
+### Serial Monitor Output
+Connect via USB for debugging:
+- Sensor readings every 5 seconds
+- Bluetooth connection status
+- GPS fix status
+- Real-time altitude and climb rate
+
+## Key Differences from Original
+
+### Removed Components
+- ❌ LCD display and fonts
+- ❌ Audio/speaker/amplifier
+- ❌ WiFi web server
+- ❌ SPI flash logging
+- ❌ Complex Kalman filter
+- ❌ Route navigation
+- ❌ Button matrix UI
+
+### Simplified Architecture
+- ✅ I2C-only sensors (no SPI)
+- ✅ Bluetooth-focused design
+- ✅ Simple Kalman filter for altitude smoothing
+- ✅ NMEA GPS parsing
+- ✅ Single button operation
+- ✅ Phone app integration optimized
+
+### Performance
+- **Power consumption**: ~50-80mA (vs 100-150mA original)
+- **Size**: 24x24mm (vs larger custom PCB)
+- **Boot time**: <10 seconds to Bluetooth ready
+- **Update rate**: 5Hz Bluetooth transmission (configurable 1-10Hz)
+
+## Troubleshooting
+
+### Common Issues
+
+1. **I2C Sensor Not Found**
+   - Check wiring connections
+   - Verify 3.3V power supply
+   - Try different I2C addresses
+
+2. **HMC5883L Not Working**
+   - Ensure MPU6050 bypass mode is enabled
+   - Check if magnetometer is functional (some GY-86 boards have issues)
+
+3. **GPS Not Working**
+   - Verify RX/TX connections (crossed correctly)
+   - Check baud rate (9600 default, some modules use 38400)
+   - Ensure GPS has clear sky view
+
+4. **Bluetooth Connection Issues**
+   - Restart Bluetooth on phone
+   - Clear Bluetooth cache
+   - Try re-pairing device
+
+### Debug Output
+Enable serial monitor at 115200 baud to see:
+- Sensor initialization status
+- Real-time sensor values
+- GPS parsing results  
+- Bluetooth transmission messages
+
+## Future Enhancements
+
+### Potential Additions
+- Battery level monitoring
+- RGB LED status indicators
+- WiFi configuration portal
+- Data logging to phone via Bluetooth
+- Multiple sensor calibration modes
+- Deep sleep power management
+
+This streamlined version focuses on the core functionality needed for phone-based flight applications while maintaining the sophisticated sensor fusion and Bluetooth integration of the original project.

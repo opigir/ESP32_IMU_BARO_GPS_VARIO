@@ -18,8 +18,6 @@
 #include "sensor/ms5611_i2c.h"
 #include "sensor/imu.h"
 #include "sensor/kalmanfilter4d.h"
-#include "sensor/gps.h"
-#include "sensor/ringbuf.h"
 
 // Debug logging macros - now runtime controlled
 #ifdef DEBUG_FUSION_ONLY
@@ -43,24 +41,8 @@ float kalmanAdaptFactor = 3.0f;     // More aggressive adaptation (was 2.0f)
 float accelMeasVariance = 2.0f;     // Trust accelerometer much more (was 5.0f)
 float accelBiasVariance = 0.02f;    // Allow faster bias adaptation (was 0.01f)
 
-// Helper macro for degree to radian conversion
-#ifndef DEG2RAD
-#define DEG2RAD(x) ((x) * PI / 180.0f)
-#endif
-
 // Runtime debug control
 bool showFusionDebug = false;       // Toggle fusion debug output
-
-// Global quaternion variables for IMU orientation (from imu.h)
-extern float q0, q1, q2, q3;
-
-// MS5611 I2C sensor variables (matching ms5611_i2c.h interface)
-extern float ZCmSample_MS5611_I2C;
-extern float PaSample_MS5611_I2C;
-extern int CelsiusSample_MS5611_I2C;
-
-// Using existing ringbuf module from sensor/ folder
-// Ring buffer functions are declared in sensor/ringbuf.h
 
 // RGB LED configuration for M5Stack Atom Lite
 #define NUM_LEDS    1
@@ -75,22 +57,14 @@ bool ledActive = false;
 BluetoothSerial SerialBT;
 unsigned long lastValidGps = 0;
 
-// GPS module compatibility stubs (minimal build)
-OPTIONS opt = { .misc = { .logType = LOGTYPE_NONE, .trackIntervalSecs = 1, .utcOffsetMins = 0 } };
-SemaphoreHandle_t FlashLogMutex = NULL;
-bool IsGpsTrackActive = false;
-bool IsLoggingIBG = false;
-FLASHLOG_IBG_RECORD FlashLogIBGRecord = {0};
-FLASHLOG_GPS_RECORD FlashLogGPSRecord = {0};
-
-// Stub functions for flash logging
-int flashlog_writeIBGRecord(FLASHLOG_IBG_RECORD* record) { return 0; }
-void flashlog_writeGPSRecord(FLASHLOG_GPS_RECORD* record) {}
-
 // Forward declarations
+void parseGGA(String sentence);
+void parseRMC(String sentence);
+float parseCoordinate(String coord, String dir);
 void setLedMode(uint8_t mode, uint32_t duration_ms);
 void updateLed();
-void generateNMEAFromUBX();
+bool initializeGPS();
+bool testGPSBaudRate(uint32_t baudRate);
 
 // Sensor data
 struct SensorData {
@@ -181,13 +155,9 @@ bool initializeSensorFusion() {
     float initialAltitude = (validReadings > 0) ? (altSum / validReadings) : 0.0f;
     Serial.printf("Initial altitude: %.2f m (from %d readings)\n", initialAltitude, validReadings);
     
-    // Initialize ring buffer for accelerometer averaging
-    ringbuf_init();
-    Serial.println("Ring buffer initialized");
-    
     // Configure Kalman filter with runtime tunable values
     kalmanFilter4d_configure(kalmanAccelVariance, kalmanAdaptFactor, 
-                            initialAltitude * 100.0f, 0.0f, 0.0f); // Convert to cm like original
+                            initialAltitude, 0.0f, 0.0f);
     
     sensorFusionInitialized = true;
     Serial.println("Sensor fusion initialized successfully");
@@ -206,31 +176,12 @@ void updateSensorFusion() {
         
         // Read MPU6050 data
         if (mpu6050_getGyroAccelData(&gx, &gy, &gz, &ax, &ay, &az) == 0) {
-            // Apply NED coordinate transformation (from original main-old.cpp lines 308-317)
-            // translate from sensor axes to AHRS NED (north-east-down) right handed coordinate frame
-            float axNEDmG = -ay * 1000.0f;  // Convert g to milli-G
-            float ayNEDmG = -ax * 1000.0f;
-            float azNEDmG = az * 1000.0f;
-            float gxNEDdps = gy;
-            float gyNEDdps = gx;
-            float gzNEDdps = -gz;
-            
-            // Use accelerometer data for determining the orientation quaternion only when accel 
-            // vector magnitude is in [0.75g, 1.25g] window (from original lines 320-321)
-            float asqd = axNEDmG*axNEDmG + ayNEDmG*ayNEDmG + azNEDmG*azNEDmG;
-            int useAccel = ((asqd > 562500.0f) && (asqd < 1562500.0f)) ? 1 : 0;
-            
-            // Update IMU orientation filter with NED coordinates
+            // Update IMU orientation filter
             float dt = IMU_INTERVAL_US / 1000000.0f;
-            imu_mahonyAHRSupdate6DOF(useAccel, dt, 
-                                   DEG2RAD(gxNEDdps), DEG2RAD(gyNEDdps), DEG2RAD(gzNEDdps), 
-                                   axNEDmG, ayNEDmG, azNEDmG);
+            imu_mahonyAHRSupdate6DOF(1, dt, gx, gy, gz, ax, ay, az);
             
-            // Calculate gravity-compensated acceleration using NED coordinates
-            float accelZ = imu_gravityCompensatedAccel(axNEDmG, ayNEDmG, azNEDmG, q0, q1, q2, q3);
-            
-            // Add to ring buffer for averaging (like original)
-            ringbuf_addSample(accelZ);
+            // Calculate gravity-compensated acceleration (INVERT the result for correct orientation)
+            float accelZ = -imu_gravityCompensatedAccel(ax, ay, az, q0, q1, q2, q3);
             
             // Kalman filter prediction step
             kalmanFilter4d_predict(dt);
@@ -264,11 +215,8 @@ void updateSensorFusion() {
                 lastTime = now;
 #else
                 // Full Kalman filter (original approach)
-                // Use averaged acceleration from ring buffer like original
-                float zAccelAverage = ringbuf_averageNewestSamples(10);
-                kalmanFilter4d_update(pressureAltM * 100.0f, zAccelAverage, &fusedAltitudeM, &fusedClimbRateCmS);
-                fusedAltitudeM /= 100.0f; // Convert back to meters for display
-                // fusedClimbRateCmS is already in cm/s from Kalman filter
+                kalmanFilter4d_update(pressureAltM, accelZ, &fusedAltitudeM, &fusedClimbRateCmS);
+                fusedClimbRateCmS *= 100.0f; // Convert m/s to cm/s
 #endif
                 newBaroSample = false;
             }
@@ -375,6 +323,82 @@ void updateLed() {
     }
 }
 
+// Test GPS at specific baud rate by looking for valid NMEA sentences
+bool testGPSBaudRate(uint32_t baudRate) {
+    Serial.printf("Testing GPS at %d baud...\n", baudRate);
+    Serial1.begin(baudRate, SERIAL_8N1, pinGpsRXD, pinGpsTXD);
+    delay(100);
+    
+    // Clear any existing data
+    while (Serial1.available()) {
+        Serial1.read();
+    }
+    
+    // Look for valid NMEA sentences for 3 seconds
+    unsigned long startTime = millis();
+    String buffer = "";
+    int validSentences = 0;
+    
+    while (millis() - startTime < 3000) {
+        while (Serial1.available()) {
+            char c = Serial1.read();
+            if (c == '\n') {
+                buffer.trim();
+                // Check if it's a valid NMEA sentence (no binary corruption)
+                if (buffer.startsWith("$") && buffer.indexOf('*') > 0) {
+                    // Check for no binary characters
+                    bool clean = true;
+                    for (int i = 0; i < buffer.length(); i++) {
+                        if (buffer[i] < 32 && buffer[i] != '\r' && buffer[i] != '\n') {
+                            clean = false;
+                            break;
+                        }
+                    }
+                    if (clean) {
+                        validSentences++;
+                        Serial.printf("  Valid: %s\n", buffer.c_str());
+                        if (validSentences >= 3) {
+                            Serial.printf("GPS detected at %d baud - found %d valid sentences\n", baudRate, validSentences);
+                            return true;
+                        }
+                    }
+                } else if (buffer.length() > 0) {
+                    // Show corrupted data
+                    Serial.printf("  Corrupted: %s\n", buffer.substring(0, 50).c_str());
+                }
+                buffer = "";
+            } else if (buffer.length() < 150) {
+                buffer += c;
+            }
+        }
+    }
+    
+    Serial.printf("GPS test at %d baud failed - found %d valid sentences\n", baudRate, validSentences);
+    return false;
+}
+
+// Initialize GPS with automatic baud rate detection
+bool initializeGPS() {
+    Serial.printf("GPS pins: RX=%d, TX=%d\n", pinGpsRXD, pinGpsTXD);
+    
+    // Common GPS baud rates to try (9600 first as most GPS default to this)
+    uint32_t baudRates[] = {9600, 38400, 115200, 57600, 19200};
+    int numRates = sizeof(baudRates) / sizeof(baudRates[0]);
+    
+    Serial.println("Note: Most GPS modules default to 9600 baud despite specs claiming 115200");
+    
+    for (int i = 0; i < numRates; i++) {
+        if (testGPSBaudRate(baudRates[i])) {
+            Serial.printf("GPS successfully initialized at %d baud\n", baudRates[i]);
+            return true;
+        }
+        Serial1.end(); // Stop UART before trying next baud rate
+        delay(100);
+    }
+    
+    return false;
+}
+
 void setup() {
     Serial.begin(115200);
     delay(2000); // Give time for serial monitor to connect
@@ -405,12 +429,14 @@ void setup() {
     FastLED.show();
     Serial.println("RGB LED initialized");
     
-    // Initialize Bluetooth
+    // Initialize Bluetooth with callback for connection status
     if (!SerialBT.begin("ESP32-BT-Vario-Atom")) {
         Serial.println("Bluetooth initialization failed!");
         while(1) delay(1000);
     }
     Serial.println("Bluetooth initialized: ESP32-BT-Vario-Atom");
+    
+    // Note: Bluetooth connection status will be monitored via hasClient() in main loop
     
     // Initialize advanced sensor fusion system
     if (!initializeSensorFusion()) {
@@ -419,13 +445,11 @@ void setup() {
     }
     Serial.println("Advanced sensor fusion initialized");
     
-    // Initialize GPS using existing sensor module
-    Serial.printf("Initializing GPS: RX=%d, TX=%d, Baud=%d\n", pinGpsRXD, pinGpsTXD, GPS_BAUD_RATE);
-    if (!gps_config()) {
-        Serial.println("GPS initialization failed!");
-        while(1) delay(1000);
-    }
-    Serial.println("GPS initialized with UBX configuration");
+    // Initialize GPS UART at 115200 baud (as per your specs)
+    Serial.printf("Initializing GPS UART: RX=%d, TX=%d, Baud=115200\n", pinGpsRXD, pinGpsTXD);
+    Serial1.begin(115200, SERIAL_8N1, pinGpsRXD, pinGpsTXD);
+    Serial.println("BZ-121 GPS UART initialized at 115200 baud");
+    Serial.println("Will dump raw GPS data for analysis...");
     
     // Initialize sensor data
     memset(&sensorData, 0, sizeof(sensorData));
@@ -437,53 +461,208 @@ void setup() {
 
 
 void readGPS() {
-    // Use existing GPS state machine from sensor/gps.cpp
-    gps_stateMachine();
+    static String gpsBuffer = "";
+    static unsigned long lastGpsData = 0;
+    static int gpsCharCount = 0;
+    static bool rawDumpMode = true;
+    static unsigned long rawDumpStart = 0;
     
-    // Check for new GPS data and update sensor structure
-    if (IsGpsNavUpdated) {
-        IsGpsNavUpdated = false;
-        lastValidGps = millis();
-        
-        // Update sensorData from UBX NavPvt structure
-        sensorData.gpsValid = (NavPvt.nav.fixType >= 2); // 2D or 3D fix
-        sensorData.latitude = NavPvt.nav.latDeg7 / 10000000.0f;
-        sensorData.longitude = NavPvt.nav.lonDeg7 / 10000000.0f;
-        sensorData.gpsAltitudeM = NavPvt.nav.heightMSLmm / 1000.0f;
-        sensorData.year = NavPvt.nav.utcYear;
-        sensorData.month = NavPvt.nav.utcMonth;
-        sensorData.day = NavPvt.nav.utcDay;
-        sensorData.hour = NavPvt.nav.utcHour;
-        sensorData.minute = NavPvt.nav.utcMinute;
-        sensorData.second = NavPvt.nav.utcSecond;
-        
-        // Calculate speed and course from velocity components
-        float velNorth = NavPvt.nav.velNorthmmps / 1000.0f; // Convert mm/s to m/s
-        float velEast = NavPvt.nav.velEastmmps / 1000.0f;
-        sensorData.speedKmH = sqrt(velNorth*velNorth + velEast*velEast) * 3.6f; // Convert m/s to km/h
-        
-        if (sensorData.speedKmH > 1.0f) { // Only calculate course if moving
-            sensorData.courseHeadingDeg = atan2(velEast, velNorth) * 180.0f / PI;
-            if (sensorData.courseHeadingDeg < 0) sensorData.courseHeadingDeg += 360.0f;
-        }
-        
-        DEBUG_LOG("GPS: Fix=%d, Lat=%.6f, Lon=%.6f, Alt=%.1fm, Spd=%.1fkm/h, Sats=%d\n", 
-                 NavPvt.nav.fixType, sensorData.latitude, sensorData.longitude, 
-                 sensorData.gpsAltitudeM, sensorData.speedKmH, NavPvt.nav.numSV);
+    // Check for GPS timeout (no valid data for 5 seconds)
+    if (sensorData.gpsValid && (millis() - lastValidGps > 5000)) {
+        sensorData.gpsValid = false;
+        Serial.println("GPS: Timeout - marking as invalid");
     }
     
-    // Report GPS status periodically
+    // Raw dump mode disabled - GPS analysis complete
+    
+    // Enhanced GPS processing to handle mixed binary/NMEA data
+    while (Serial1.available()) {
+        char c = Serial1.read();
+        gpsCharCount++;
+        lastGpsData = millis();
+        
+        // Only process printable ASCII characters and line endings for NMEA
+        if (c == '$') {
+            // Start of new NMEA sentence - reset buffer
+            gpsBuffer = "$";
+        } else if (c >= 32 && c <= 126) {
+            // Printable ASCII character
+            gpsBuffer += c;
+        } else if (c == '\r' || c == '\n') {
+            // Line ending - process if we have a valid sentence
+            if (gpsBuffer.length() > 6 && gpsBuffer.startsWith("$") && gpsBuffer.indexOf('*') > 0) {
+                // Check for clean NMEA sentence (no binary corruption)
+                bool isClean = true;
+                for (int i = 0; i < gpsBuffer.length(); i++) {
+                    char ch = gpsBuffer[i];
+                    if (ch < 32 && ch != '\r' && ch != '\n') {
+                        isClean = false;
+                        break;
+                    }
+                }
+                
+                if (isClean) {
+                    DEBUG_LOG("GPS: %s", gpsBuffer.c_str());
+                    
+                    // Process complete NMEA sentence
+                    if (gpsBuffer.startsWith("$GPGGA") || gpsBuffer.startsWith("$GNGGA") || 
+                        gpsBuffer.startsWith("$GLGGA") || gpsBuffer.startsWith("$BDGGA") || gpsBuffer.startsWith("$GAGGA")) {
+                        parseGGA(gpsBuffer);
+                    } else if (gpsBuffer.startsWith("$GPRMC") || gpsBuffer.startsWith("$GNRMC") || 
+                               gpsBuffer.startsWith("$GLRMC") || gpsBuffer.startsWith("$BDRMC") || gpsBuffer.startsWith("$GARMC")) {
+                        parseRMC(gpsBuffer);
+                    }
+                }
+            }
+            gpsBuffer = ""; // Reset buffer after line ending
+        } else {
+            // Binary/non-printable character - ignore and don't add to buffer
+            // This filters out the UBX binary data mixed with NMEA
+        }
+        
+        // Prevent buffer overflow
+        if (gpsBuffer.length() > 150) {
+            gpsBuffer = "";
+        }
+    }
+    
+    // Report GPS status periodically with more detail
     static unsigned long lastGpsReport = 0;
     if (millis() - lastGpsReport > 10000) { // Every 10 seconds
-        Serial.printf("GPS: Fix=%d, Satellites=%d, Valid=%s\n", 
-                     NavPvt.nav.fixType, NavPvt.nav.numSV, 
-                     sensorData.gpsValid ? "YES" : "NO");
+        if (gpsCharCount > 0) {
+            Serial.printf("GPS: Received %d characters, last data %lu ms ago, Valid: %s\n", 
+                         gpsCharCount, millis() - lastGpsData, sensorData.gpsValid ? "YES" : "NO");
+            gpsCharCount = 0;
+        } else {
+            Serial.println("GPS: No data received - check wiring or move outdoors");
+        }
         lastGpsReport = millis();
     }
 }
 
-// GPS parsing is now handled by the existing sensor/gps.cpp module
-// which processes UBX binary data directly
+void parseGGA(String sentence) {
+    // Robust GGA parser for position and altitude
+    int commaPos[15];
+    int commaCount = 0;
+    
+    // Find all comma positions
+    for (int i = 0; i < sentence.length() && commaCount < 15; i++) {
+        if (sentence[i] == ',') {
+            commaPos[commaCount++] = i;
+        }
+    }
+    
+    // GGA needs at least 14 commas (15 fields total)
+    if (commaCount >= 14) {
+        // Extract latitude
+        String latStr = sentence.substring(commaPos[1] + 1, commaPos[2]);
+        String latDir = sentence.substring(commaPos[2] + 1, commaPos[3]);
+        
+        // Extract longitude
+        String lonStr = sentence.substring(commaPos[3] + 1, commaPos[4]);
+        String lonDir = sentence.substring(commaPos[4] + 1, commaPos[5]);
+        
+        // Extract fix quality
+        String fixQuality = sentence.substring(commaPos[5] + 1, commaPos[6]);
+        
+        // Extract altitude
+        String altStr = sentence.substring(commaPos[8] + 1, commaPos[9]);
+        
+        // Check for valid GPS fix: need coordinates, direction, and fix quality > 0
+        if (latStr.length() >= 4 && lonStr.length() >= 4 && 
+            (latDir == "N" || latDir == "S") && (lonDir == "E" || lonDir == "W") &&
+            fixQuality.toInt() > 0 && altStr.length() > 0) {
+            
+            float lat = parseCoordinate(latStr, latDir);
+            float lon = parseCoordinate(lonStr, lonDir);
+            
+            // Sanity check coordinates (rough world bounds)
+            if (lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) {
+                sensorData.latitude = lat;
+                sensorData.longitude = lon;
+                sensorData.gpsAltitudeM = altStr.toFloat();
+                sensorData.gpsValid = true;
+                
+                // Update lastValidGps timestamp
+                lastValidGps = millis();
+            } else {
+                Serial.printf("GPS: Invalid coordinates: lat=%.6f, lon=%.6f\n", lat, lon);
+                sensorData.gpsValid = false;
+            }
+        } else {
+            // Invalid GPS data - mark as invalid
+            sensorData.gpsValid = false;
+        }
+    }
+}
+
+void parseRMC(String sentence) {
+    // Simple RMC parser for time, date, speed, and course
+    int commaPos[15];
+    int commaCount = 0;
+    
+    for (int i = 0; i < sentence.length() && commaCount < 15; i++) {
+        if (sentence[i] == ',') {
+            commaPos[commaCount++] = i;
+        }
+    }
+    
+    if (commaCount >= 9) {
+        // Extract time
+        String timeStr = sentence.substring(commaPos[0] + 1, commaPos[1]);
+        if (timeStr.length() >= 6) {
+            sensorData.hour = timeStr.substring(0, 2).toInt();
+            sensorData.minute = timeStr.substring(2, 4).toInt();
+            sensorData.second = timeStr.substring(4, 6).toInt();
+        }
+        
+        // Extract date
+        String dateStr = sentence.substring(commaPos[8] + 1, commaPos[9]);
+        if (dateStr.length() >= 6) {
+            sensorData.day = dateStr.substring(0, 2).toInt();
+            sensorData.month = dateStr.substring(2, 4).toInt();
+            sensorData.year = 2000 + dateStr.substring(4, 6).toInt();
+        }
+        
+        // Extract speed
+        String speedStr = sentence.substring(commaPos[6] + 1, commaPos[7]);
+        if (speedStr.length() > 0) {
+            sensorData.speedKmH = speedStr.toFloat() * 1.852f; // Convert knots to km/h
+        }
+        
+        // Extract course
+        String courseStr = sentence.substring(commaPos[7] + 1, commaPos[8]);
+        if (courseStr.length() > 0) {
+            sensorData.courseHeadingDeg = courseStr.toFloat();
+        }
+    }
+}
+
+float parseCoordinate(String coord, String dir) {
+    if (coord.length() < 4) return 0.0f;
+    
+    int dotPos = coord.indexOf('.');
+    if (dotPos < 2) return 0.0f; // Invalid format
+    
+    String degStr = coord.substring(0, dotPos - 2);
+    String minStr = coord.substring(dotPos - 2);
+    
+    if (degStr.length() == 0 || minStr.length() < 3) return 0.0f; // Invalid format
+    
+    float degrees = degStr.toFloat();
+    float minutes = minStr.toFloat();
+    
+    // Sanity check: minutes should be < 60
+    if (minutes >= 60.0f) return 0.0f;
+    
+    float result = degrees + minutes / 60.0f;
+    
+    if (dir == "S" || dir == "W") {
+        result = -result;
+    }
+    
+    return result;
+}
 
 void processSerialCommands() {
     if (Serial.available()) {
@@ -715,10 +894,11 @@ void loop() {
     // Print status every 5 seconds
     static unsigned long lastStatus = 0;
     if (now - lastStatus >= 5000) {
-        Serial.printf("Alt: %.1fm, ClimbRate: %.1fcm/s, Press: %.1fhPa, GPS: %s, Fusion: %s\n",
+        Serial.printf("Alt: %.1fm, ClimbRate: %.1fcm/s, Press: %.1fhPa, GPS: %s, BT: %s, Fusion: %s\n",
                      sensorData.altitudeM, sensorData.climbRateCmS, 
                      sensorData.pressurePa / 100.0f, 
                      sensorData.gpsValid ? "Valid" : "Invalid",
+                     SerialBT.hasClient() ? "Connected" : "Disconnected",
                      sensorFusionInitialized ? "Active" : "Disabled");
         lastStatus = now;
     }
