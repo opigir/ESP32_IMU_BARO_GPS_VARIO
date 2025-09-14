@@ -7,5 +7,5 @@ sandbox
 test/.ipynb_checkpoints
 offline/.ipynb_checkpoints
 offline/kf/.ipynb_checkpoints
-.history
-logs
+.history/
+logs/
