@@ -2,6 +2,10 @@
 #include <Wire.h>
 #include <BluetoothSerial.h>
 #include <FastLED.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
 
 // M5Stack Atom Lite + GY-86 Bluetooth Pressure Sensor + GPS
 // Advanced version with Kalman filter sensor fusion for zero-lag variometer
@@ -21,17 +25,9 @@
 #include "sensor/gps.h"
 #include "sensor/ringbuf.h"
 
-// Debug logging macros - now runtime controlled
-#ifdef DEBUG_FUSION_ONLY
-  #define DEBUG_LOG(fmt, ...) // Disable regular debug logs
-  #define FUSION_LOG(fmt, ...) Serial.printf(fmt, ##__VA_ARGS__)
-#elif defined(DEBUG_ALL_LOGS)
-  #define DEBUG_LOG(fmt, ...) Serial.printf(fmt, ##__VA_ARGS__)
-  #define FUSION_LOG(fmt, ...) Serial.printf(fmt, ##__VA_ARGS__)
-#else
-  #define DEBUG_LOG(fmt, ...) // Disable regular debug logs by default
-  #define FUSION_LOG(fmt, ...) if(showFusionDebug) Serial.printf(fmt, ##__VA_ARGS__)
-#endif
+// Minimal debug logging to save space
+#define DEBUG_LOG(fmt, ...) // Disabled for space
+#define FUSION_LOG(fmt, ...) // Disabled for space
 
 // Sensor fusion configuration
 #define IMU_SAMPLE_RATE_HZ      500   // High-frequency IMU sampling
@@ -73,10 +69,16 @@ bool ledActive = false;
 
 // Global variables
 BluetoothSerial SerialBT;
+WebServer webServer(80);
+Preferences preferences;
 unsigned long lastValidGps = 0;
 
+// WiFi Configuration
+const char* ssid = "ESP32-Vario-Config";  // AP mode SSID
+const char* password = "vario123";        // AP mode password
+
 // GPS module compatibility stubs (minimal build)
-OPTIONS opt = { .misc = { .logType = LOGTYPE_NONE, .trackIntervalSecs = 1, .utcOffsetMins = 0 } };
+OPTIONS opt = { .misc = { .logType = LOGTYPE_NONE, .trackIntervalSecs = 1, .utcOffsetMins = 0, .useBaroOnly = 0 } };
 SemaphoreHandle_t FlashLogMutex = NULL;
 bool IsGpsTrackActive = false;
 bool IsLoggingIBG = false;
@@ -87,10 +89,23 @@ FLASHLOG_GPS_RECORD FlashLogGPSRecord = {0};
 int flashlog_writeIBGRecord(FLASHLOG_IBG_RECORD* record) { return 0; }
 void flashlog_writeGPSRecord(FLASHLOG_GPS_RECORD* record) {}
 
+// Simple options initialization for minimal build
+void opt_setDefaults() {
+    opt.misc.logType = LOGTYPE_NONE;
+    opt.misc.trackIntervalSecs = 1;
+    opt.misc.utcOffsetMins = 0;
+    opt.misc.useBaroOnly = 0;  // Default to fusion mode
+}
+
 // Forward declarations
 void setLedMode(uint8_t mode, uint32_t duration_ms);
 void updateLed();
 void generateNMEAFromUBX();
+void setupWebServer();
+void handleRoot();
+void handleGetStatus();
+void handleSetParams();
+String getWebPageHTML();
 
 // Sensor data
 struct SensorData {
@@ -110,22 +125,63 @@ struct SensorData {
     uint8_t hdop;
 } sensorData;
 
+// Configuration (moved up for use in save/load functions)
+uint8_t btMsgType = BT_MSG_XCTRC;  // Default to XCTRC for full GPS integration
+uint8_t btMsgFreqHz = 5;           // 5Hz transmission rate
+unsigned long BT_INTERVAL_MS = 200;            // Dynamic Bluetooth transmission interval
+
 // Timing variables
 unsigned long lastBtTransmit = 0;
 unsigned long lastSensorRead = 0;
 unsigned long lastGpsRead = 0;
-const unsigned long BT_INTERVAL_MS = 200;      // 5Hz Bluetooth transmission
 const unsigned long SENSOR_INTERVAL_MS = 100; // 10Hz sensor reading
 const unsigned long GPS_INTERVAL_MS = 100;    // Check GPS at 10Hz
-
-// Configuration
-uint8_t btMsgType = BT_MSG_XCTRC;  // Default to XCTRC for full GPS integration
-uint8_t btMsgFreqHz = 5;           // 5Hz transmission rate
 
 // High-frequency sensor fusion variables
 float fusedAltitudeM = 0.0f;
 float fusedClimbRateCmS = 0.0f;
 bool sensorFusionInitialized = false;
+
+// Save web configuration settings to NVS
+void saveWebConfig() {
+    preferences.begin("vario_config", false);
+    preferences.putFloat("kalmanAccelVar", kalmanAccelVariance);
+    preferences.putFloat("kalmanAdaptFac", kalmanAdaptFactor);
+    preferences.putFloat("accelMeasVar", accelMeasVariance);
+    preferences.putFloat("accelBiasVar", accelBiasVariance);
+    preferences.putBool("showFusionDbg", showFusionDebug);
+    preferences.putUChar("btMsgType", btMsgType);
+    preferences.putUChar("btMsgFreqHz", btMsgFreqHz);
+    preferences.putBool("useBaroOnly", opt.misc.useBaroOnly);
+    preferences.end();
+    Serial.println("Web configuration saved to NVS");
+}
+
+// Load web configuration settings from NVS
+void loadWebConfig() {
+    preferences.begin("vario_config", true); // Read-only mode
+    kalmanAccelVariance = preferences.getFloat("kalmanAccelVar", 25.0f);
+    kalmanAdaptFactor = preferences.getFloat("kalmanAdaptFac", 3.0f);
+    accelMeasVariance = preferences.getFloat("accelMeasVar", 2.0f);
+    accelBiasVariance = preferences.getFloat("accelBiasVar", 0.02f);
+    showFusionDebug = preferences.getBool("showFusionDbg", false);
+    btMsgType = preferences.getUChar("btMsgType", BT_MSG_XCTRC);
+    btMsgFreqHz = preferences.getUChar("btMsgFreqHz", 5);
+    opt.misc.useBaroOnly = preferences.getBool("useBaroOnly", false);
+    preferences.end();
+
+    // Update Bluetooth interval based on loaded frequency
+    BT_INTERVAL_MS = 1000 / btMsgFreqHz;
+
+    Serial.printf("Web configuration loaded from NVS:\n");
+    Serial.printf("  Kalman Accel Variance: %.1f\n", kalmanAccelVariance);
+    Serial.printf("  Kalman Adapt Factor: %.1f\n", kalmanAdaptFactor);
+    Serial.printf("  Accel Meas Variance: %.1f\n", accelMeasVariance);
+    Serial.printf("  Accel Bias Variance: %.3f\n", accelBiasVariance);
+    Serial.printf("  BT Message Type: %s\n", (btMsgType == BT_MSG_LK8EX1) ? "LK8EX1" : "XCTRC");
+    Serial.printf("  BT Frequency: %d Hz\n", btMsgFreqHz);
+    Serial.printf("  Barometer Only: %s\n", opt.misc.useBaroOnly ? "ON" : "OFF");
+}
 
 // Timing for sensor fusion
 unsigned long lastImuUpdate = 0;
@@ -149,10 +205,7 @@ bool initializeSensorFusion() {
         return false;
     }
     
-    // Calibrate sensors
-    Serial.println("Calibrating MPU6050 (keep device still)...");
-    mpu6050_calibrateGyro();
-    mpu6050_calibrateAccel();
+    // MPU6050 configured - calibration now done manually via long button press
     
     // Configure MS5611 I2C
     if (ms5611_i2c_config() != 0) {
@@ -206,11 +259,13 @@ void updateSensorFusion() {
         
         // Read MPU6050 data
         if (mpu6050_getGyroAccelData(&gx, &gy, &gz, &ax, &ay, &az) == 0) {
-            // Apply NED coordinate transformation (from original main-old.cpp lines 308-317)
-            // translate from sensor axes to AHRS NED (north-east-down) right handed coordinate frame
+            // Apply NED coordinate transformation for flat-mounted MPU6050 (labeled side up)
+            // MPU6050 coordinate system: X=left-to-right, Y=back-to-front, Z=upward
+            // NED coordinate system: X=north, Y=east, Z=down
+            // When flat on table: MPU reads X≈0, Y≈0, Z≈+1g
             float axNEDmG = -ay * 1000.0f;  // Convert g to milli-G
             float ayNEDmG = -ax * 1000.0f;
-            float azNEDmG = az * 1000.0f;
+            float azNEDmG = az * 1000.0f;   // Positive: MPU Z+ (up) → NED Z+ (down)
             float gxNEDdps = gy;
             float gyNEDdps = gx;
             float gzNEDdps = -gz;
@@ -290,22 +345,9 @@ void updateSensorFusion() {
             sensorData.pressurePa = PaSample_MS5611_I2C;
             sensorData.temperatureC = CelsiusSample_MS5611_I2C / 100.0f;
             
-            // TEMPORARY DEBUG: Check if fusion is giving reasonable values
+            // Simple fallback for extreme values
             if (abs(sensorData.climbRateCmS) > 2000) {
-                // Fusion giving extreme values, fall back to simple pressure-only calculation
-                static float lastPressureAlt = pressureAltM;
-                static unsigned long lastPressureTime = millis();
-                unsigned long now = millis();
-                float dt = (now - lastPressureTime) / 1000.0f;
-                if (dt > 0.1f && lastPressureTime > 0) {
-                    float simpleClimbRate = ((pressureAltM - lastPressureAlt) / dt) * 100.0f; // cm/s
-                    FUSION_LOG("[FALLBACK] Fusion=%.0fcm/s, Simple=%.0fcm/s, using simple\n", 
-                              sensorData.climbRateCmS, simpleClimbRate);
-                    sensorData.climbRateCmS = simpleClimbRate;
-                    sensorData.altitudeM = pressureAltM;
-                }
-                lastPressureAlt = pressureAltM;
-                lastPressureTime = now;
+                sensorData.climbRateCmS = 0; // Reset extreme values
             }
         }
     }
@@ -375,6 +417,56 @@ void updateLed() {
     }
 }
 
+void performCalibration() {
+    Serial.println("Starting MPU6050 calibration sequence...");
+
+    // LED sequence: Red -> Yellow -> Green -> Blue (flashing during calibration)
+    Serial.println("Calibration countdown...");
+
+    // Red phase - 1 second
+    leds[0] = CRGB::Red;
+    FastLED.show();
+    delay(1000);
+
+    // Yellow phase - 1 second
+    leds[0] = CRGB::Yellow;
+    FastLED.show();
+    delay(1000);
+
+    // Green phase - 1 second
+    leds[0] = CRGB::Green;
+    FastLED.show();
+    delay(1000);
+
+    // Blue flashing during calibration
+    Serial.println("Keep device stationary - calibrating...");
+
+    // Flash blue slowly during calibration
+    for (int i = 0; i < 10; i++) {
+        leds[0] = CRGB::Blue;
+        FastLED.show();
+        delay(200);
+        leds[0] = CRGB::Black;
+        FastLED.show();
+        delay(200);
+    }
+
+    // Perform actual calibration
+    mpu6050_calibrateGyro();
+    mpu6050_calibrateAccel();
+
+    // Success indication - solid green for 2 seconds
+    leds[0] = CRGB::Green;
+    FastLED.show();
+    delay(2000);
+
+    // Return to normal operation
+    leds[0] = CRGB::Black;
+    FastLED.show();
+
+    Serial.println("MPU6050 calibration completed!");
+}
+
 void setup() {
     Serial.begin(115200);
     delay(2000); // Give time for serial monitor to connect
@@ -418,6 +510,10 @@ void setup() {
         while(1) delay(1000);
     }
     Serial.println("Advanced sensor fusion initialized");
+
+    // Configure Kalman filter with loaded settings
+    kalmanFilter4d_configure(kalmanAccelVariance, kalmanAdaptFactor, 0.0f, 0.0f, 0.0f);
+    Serial.println("Kalman filter configured with saved settings");
     
     // Initialize GPS using existing sensor module
     Serial.printf("Initializing GPS: RX=%d, TX=%d, Baud=%d\n", pinGpsRXD, pinGpsTXD, GPS_BAUD_RATE);
@@ -431,7 +527,17 @@ void setup() {
     memset(&sensorData, 0, sizeof(sensorData));
     sensorData.batteryV = 4.0f; // Default value
     
-    Serial.println("Setup complete - ready for Bluetooth connection");
+    // Initialize options system with defaults
+    opt_setDefaults();
+    Serial.println("Configuration system initialized with defaults");
+
+    // Load saved web configuration from NVS
+    loadWebConfig();
+
+    // Initialize WiFi Access Point and Web Server
+    setupWebServer();
+    
+    Serial.println("Setup complete - ready for Bluetooth and web connections");
     delay(1000);
 }
 
@@ -467,9 +573,7 @@ void readGPS() {
             if (sensorData.courseHeadingDeg < 0) sensorData.courseHeadingDeg += 360.0f;
         }
         
-        DEBUG_LOG("GPS: Fix=%d, Lat=%.6f, Lon=%.6f, Alt=%.1fm, Spd=%.1fkm/h, Sats=%d\n", 
-                 NavPvt.nav.fixType, sensorData.latitude, sensorData.longitude, 
-                 sensorData.gpsAltitudeM, sensorData.speedKmH, NavPvt.nav.numSV);
+        // GPS debug removed to save space
     }
     
     // Report GPS status periodically
@@ -486,75 +590,120 @@ void readGPS() {
 // which processes UBX binary data directly
 
 void processSerialCommands() {
-    if (Serial.available()) {
-        String cmd = Serial.readStringUntil('\n');
-        cmd.trim();
+    // Removed to save flash space - use web interface instead
+}
+
+// Web server setup and handlers
+void setupWebServer() {
+    // Set up WiFi as Access Point
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(ssid, password);
+    IPAddress IP = WiFi.softAPIP();
+    Serial.printf("Web interface available at: http://%s\n", IP.toString().c_str());
+    
+    // Define web server routes
+    webServer.on("/", handleRoot);
+    webServer.on("/status", HTTP_GET, handleGetStatus);
+    webServer.on("/setparams", HTTP_POST, handleSetParams);
+    
+    // Enable CORS for all responses
+    webServer.enableCORS(true);
+    
+    webServer.begin();
+    Serial.println("Web server started");
+}
+
+void handleRoot() {
+    webServer.send(200, "text/html", getWebPageHTML());
+}
+
+void handleGetStatus() {
+    DynamicJsonDocument doc(1024);
+    
+    // Current sensor readings
+    doc["altitude"] = sensorData.altitudeM;
+    doc["climbRate"] = sensorData.climbRateCmS;
+    doc["pressure"] = sensorData.pressurePa / 100.0f; // Convert to hPa
+    doc["temperature"] = sensorData.temperatureC;
+    doc["battery"] = sensorData.batteryV;
+    doc["gpsValid"] = sensorData.gpsValid;
+    doc["satellites"] = NavPvt.nav.numSV;
+    doc["fixType"] = NavPvt.nav.fixType;
+    
+    // Current tuning parameters
+    doc["kalmanAccelVariance"] = kalmanAccelVariance;
+    doc["kalmanAdaptFactor"] = kalmanAdaptFactor;
+    doc["accelMeasVariance"] = accelMeasVariance;
+    doc["accelBiasVariance"] = accelBiasVariance;
+    doc["showFusionDebug"] = showFusionDebug;
+    doc["btMsgType"] = btMsgType;
+    doc["btMsgFreqHz"] = btMsgFreqHz;
+    doc["useBaroOnly"] = opt.misc.useBaroOnly;
+    
+    String response;
+    serializeJson(doc, response);
+    webServer.send(200, "application/json", response);
+}
+
+void handleSetParams() {
+    if (webServer.hasArg("plain")) {
+        DynamicJsonDocument doc(1024);
+        deserializeJson(doc, webServer.arg("plain"));
         
-        if (cmd.startsWith("av ")) {
-            // Accel Variance: av 25.0
-            kalmanAccelVariance = cmd.substring(3).toFloat();
-            Serial.printf("Accel Variance set to: %.1f\n", kalmanAccelVariance);
+        // Update parameters if provided
+        if (doc.containsKey("kalmanAccelVariance")) {
+            kalmanAccelVariance = doc["kalmanAccelVariance"];
+            Serial.printf("Web: Accel Variance set to: %.1f\n", kalmanAccelVariance);
         }
-        else if (cmd.startsWith("af ")) {
-            // Adapt Factor: af 3.0
-            kalmanAdaptFactor = cmd.substring(3).toFloat();
-            Serial.printf("Adapt Factor set to: %.1f\n", kalmanAdaptFactor);
+        if (doc.containsKey("kalmanAdaptFactor")) {
+            kalmanAdaptFactor = doc["kalmanAdaptFactor"];
+            Serial.printf("Web: Adapt Factor set to: %.1f\n", kalmanAdaptFactor);
         }
-        else if (cmd.startsWith("am ")) {
-            // Accel Meas variance: am 2.0
-            accelMeasVariance = cmd.substring(3).toFloat();
-            Serial.printf("Accel Meas Variance set to: %.1f\n", accelMeasVariance);
+        if (doc.containsKey("accelMeasVariance")) {
+            accelMeasVariance = doc["accelMeasVariance"];
+            Serial.printf("Web: Accel Meas Variance set to: %.1f\n", accelMeasVariance);
         }
-        else if (cmd.startsWith("ab ")) {
-            // Accel Bias variance: ab 0.02
-            accelBiasVariance = cmd.substring(3).toFloat();
-            Serial.printf("Accel Bias Variance set to: %.3f\n", accelBiasVariance);
+        if (doc.containsKey("accelBiasVariance")) {
+            accelBiasVariance = doc["accelBiasVariance"];
+            Serial.printf("Web: Accel Bias Variance set to: %.3f\n", accelBiasVariance);
         }
-        else if (cmd == "debug") {
-            // Toggle debug output
-            showFusionDebug = !showFusionDebug;
-            Serial.printf("Fusion debug output: %s\n", showFusionDebug ? "ON" : "OFF");
+        if (doc.containsKey("showFusionDebug")) {
+            showFusionDebug = doc["showFusionDebug"];
+            Serial.printf("Web: Fusion debug: %s\n", showFusionDebug ? "ON" : "OFF");
         }
-        else if (cmd == "status") {
-            // Show current climb rate without all the debug noise
-            Serial.printf("Current ClimbRate: %.0f cm/s, Alt: %.1f m\n", 
-                         sensorData.climbRateCmS, sensorData.altitudeM);
+        if (doc.containsKey("btMsgType")) {
+            btMsgType = doc["btMsgType"];
+            Serial.printf("Web: Bluetooth message type: %s\n", (btMsgType == BT_MSG_LK8EX1) ? "LK8EX1" : "XCTRC");
+            setLedMode(btMsgType, 3000); // Show LED for 3 seconds
         }
-        else if (cmd == "show") {
-            // Show current settings
-            Serial.printf("\n=== CURRENT SETTINGS ===\n");
-            Serial.printf("  Accel Variance (av): %.1f\n", kalmanAccelVariance);
-            Serial.printf("  Adapt Factor (af): %.1f\n", kalmanAdaptFactor);
-            Serial.printf("  Accel Meas Var (am): %.1f\n", accelMeasVariance);
-            Serial.printf("  Accel Bias Var (ab): %.3f\n", accelBiasVariance);
-            Serial.printf("  Debug Output: %s\n", showFusionDebug ? "ON" : "OFF");
-            Serial.printf("=======================\n\n");
+        if (doc.containsKey("btMsgFreqHz")) {
+            btMsgFreqHz = doc["btMsgFreqHz"];
+            BT_INTERVAL_MS = 1000 / btMsgFreqHz; // Update interval based on frequency
+            Serial.printf("Web: Bluetooth frequency: %d Hz (interval: %lu ms)\n", btMsgFreqHz, BT_INTERVAL_MS);
         }
-        else if (cmd == "help") {
-            Serial.println("\n=== VARIO TUNING COMMANDS ===");
-            Serial.println("Tuning Parameters:");
-            Serial.println("  av X.X  - Accel variance (lower = more responsive, try 5-50)");
-            Serial.println("  af X.X  - Adapt factor (higher = faster, try 1-10)");
-            Serial.println("  am X.X  - Accel meas variance (lower = trust accel more, try 0.5-10)");
-            Serial.println("  ab X.XX - Accel bias variance (higher = adapt faster, try 0.01-0.1)");
-            Serial.println();
-            Serial.println("Utility Commands:");
-            Serial.println("  show    - Show current settings");
-            Serial.println("  status  - Show current climb rate (clean output)");
-            Serial.println("  debug   - Toggle debug output on/off");
-            Serial.println("  help    - Show this help");
-            Serial.println();
-            Serial.println("Quick Presets:");
-            Serial.println("  SUPER FAST:  av 5 af 8 am 0.5");
-            Serial.println("  FAST:        av 10 af 5 am 1");
-            Serial.println("  BALANCED:    av 25 af 3 am 2");
-            Serial.println("  SMOOTH:      av 50 af 1 am 5");
-            Serial.println("=============================\n");
+        if (doc.containsKey("useBaroOnly")) {
+            opt.misc.useBaroOnly = doc["useBaroOnly"];
+            Serial.printf("Web: Barometer-only mode: %s\n", opt.misc.useBaroOnly ? "ON" : "OFF");
         }
-        else if (cmd != "") {
-            Serial.println("Unknown command. Type 'help' for commands.");
+        
+        // Reconfigure Kalman filter with new parameters if they were changed
+        if (doc.containsKey("kalmanAccelVariance") || doc.containsKey("kalmanAdaptFactor")) {
+            kalmanFilter4d_configure(kalmanAccelVariance, kalmanAdaptFactor,
+                                    fusedAltitudeM * 100.0f, fusedClimbRateCmS, 0.0f);
+            Serial.println("Web: Kalman filter reconfigured");
         }
+
+        // Save all settings to persistent storage
+        saveWebConfig();
+
+        webServer.send(200, "application/json", "{\"status\":\"ok\"}");
+    } else {
+        webServer.send(400, "application/json", "{\"error\":\"No data provided\"}");
     }
+}
+
+String getWebPageHTML() {
+    return R"HTML(<!DOCTYPE html><html><head><title>Vario Config</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Arial;margin:10px;background:#f0f0f0}h1{text-align:center}div{margin:10px 0}label{display:inline-block;width:150px;font-weight:bold}input,select{margin:5px}button{padding:8px 15px;margin:5px;cursor:pointer}.status{background:#f8f9fa;padding:10px;border-radius:5px;margin:5px}</style></head><body><h1>Vario Config</h1><div id="status">Connecting...</div><h3>Status</h3><div class="status">Alt: <span id="altitude">--</span>m | Climb: <span id="climbRate">--</span>cm/s | GPS: <span id="gps">--</span></div><h3>Tuning</h3><p style="font-size:14px;color:#666;margin:5px 0;">Quick presets for different flying conditions:</p><button onclick="applyPreset('thermals')">Thermals</button><button onclick="applyPreset('ridge')">Ridge</button><button onclick="applyPreset('smooth')">Smooth</button><p style="font-size:12px;color:#666;margin:5px 0;"><strong>Thermals:</strong> Fast response, sensitive | <strong>Ridge:</strong> Balanced | <strong>Smooth:</strong> Stable, less sensitive to movement</p><div><label>Accel Variance:</label><input type="range" id="kalmanAccelVariance" min="5" max="100" step="1" oninput="updateNumberInput(this)"><input type="number" id="kalmanAccelVarianceNum" min="5" max="100" step="1" style="width:60px"><br><small style="color:#666;margin-left:155px;">< More Accelerometer Trust | Less Accelerometer Trust ></small></div><div><label>Adapt Factor:</label><input type="range" id="kalmanAdaptFactor" min="0.5" max="10" step="0.1" oninput="updateNumberInput(this)"><input type="number" id="kalmanAdaptFactorNum" min="0.5" max="10" step="0.1" style="width:60px"><br><small style="color:#666;margin-left:155px;">< Slower Response | Faster Response ></small></div><div><label>Accel Meas Var:</label><input type="range" id="accelMeasVariance" min="0.5" max="10" step="0.1" oninput="updateNumberInput(this)"><input type="number" id="accelMeasVarianceNum" min="0.5" max="10" step="0.1" style="width:60px"><br><small style="color:#666;margin-left:155px;">< Trust Accelerometer | Trust Barometer ></small></div><div><label>Accel Bias Var:</label><input type="range" id="accelBiasVariance" min="0.001" max="0.1" step="0.001" oninput="updateNumberInput(this)"><input type="number" id="accelBiasVarianceNum" min="0.001" max="0.1" step="0.001" style="width:60px"><br><small style="color:#666;margin-left:155px;">< Slow Bias Correction | Fast Bias Correction ></small></div><h3>Bluetooth</h3><div><label>Message Type:</label><select id="btMsgType"><option value="0">LK8EX1</option><option value="1">XCTRC</option></select></div><div><label>Frequency:</label><input type="range" id="btMsgFreqHz" min="1" max="10" step="1" oninput="updateNumberInput(this)"><input type="number" id="btMsgFreqHzNum" min="1" max="10" step="1" style="width:60px">Hz</div><div><label>Barometer Only:</label><input type="checkbox" id="useBaroOnly"> Send raw baro data (let phone app calculate climb rate)<br><small style="color:#666;margin-left:155px;">✓ Recommended for handheld testing and stable flight data</small></div><div><label>Debug:</label><input type="checkbox" id="showFusionDebug"> Show fusion debug messages in serial monitor</div><div style="text-align:center"><button onclick="applySettings()" id="applyBtn">Apply</button><button onclick="refreshStatus()">Refresh</button></div><script>function updateNumberInput(s){document.getElementById(s.id+'Num').value=s.value}function applyPreset(p){var v={thermals:{av:10,af:5,am:1,ab:0.02},ridge:{av:25,af:3,am:2,ab:0.02},smooth:{av:50,af:1,am:5,ab:0.01}}[p];document.getElementById('kalmanAccelVariance').value=v.av;document.getElementById('kalmanAccelVarianceNum').value=v.av;document.getElementById('kalmanAdaptFactor').value=v.af;document.getElementById('kalmanAdaptFactorNum').value=v.af;document.getElementById('accelMeasVariance').value=v.am;document.getElementById('accelMeasVarianceNum').value=v.am;document.getElementById('accelBiasVariance').value=v.ab;document.getElementById('accelBiasVarianceNum').value=v.ab}function refreshStatus(){fetch('/status').then(function(r){return r.json()}).then(function(d){document.getElementById('altitude').textContent=d.altitude.toFixed(1);document.getElementById('climbRate').textContent=d.climbRate.toFixed(0);document.getElementById('gps').textContent=d.gpsValid?'Fix('+d.fixType+')':'No Fix';document.getElementById('status').textContent='Connected'}).catch(function(){document.getElementById('status').textContent='Error'})}function loadAllSettings(){fetch('/status').then(function(r){return r.json()}).then(function(d){document.getElementById('altitude').textContent=d.altitude.toFixed(1);document.getElementById('climbRate').textContent=d.climbRate.toFixed(0);document.getElementById('gps').textContent=d.gpsValid?'Fix('+d.fixType+')':'No Fix';document.getElementById('kalmanAccelVariance').value=d.kalmanAccelVariance;document.getElementById('kalmanAccelVarianceNum').value=d.kalmanAccelVariance;document.getElementById('kalmanAdaptFactor').value=d.kalmanAdaptFactor;document.getElementById('kalmanAdaptFactorNum').value=d.kalmanAdaptFactor;document.getElementById('accelMeasVariance').value=d.accelMeasVariance;document.getElementById('accelMeasVarianceNum').value=d.accelMeasVariance;document.getElementById('accelBiasVariance').value=d.accelBiasVariance;document.getElementById('accelBiasVarianceNum').value=d.accelBiasVariance;document.getElementById('showFusionDebug').checked=d.showFusionDebug;document.getElementById('btMsgType').value=d.btMsgType;document.getElementById('btMsgFreqHz').value=d.btMsgFreqHz;document.getElementById('btMsgFreqHzNum').value=d.btMsgFreqHz;document.getElementById('useBaroOnly').checked=d.useBaroOnly;document.getElementById('status').textContent='Connected'}).catch(function(){document.getElementById('status').textContent='Error'})}function applySettings(){var s={kalmanAccelVariance:parseFloat(document.getElementById('kalmanAccelVariance').value),kalmanAdaptFactor:parseFloat(document.getElementById('kalmanAdaptFactor').value),accelMeasVariance:parseFloat(document.getElementById('accelMeasVariance').value),accelBiasVariance:parseFloat(document.getElementById('accelBiasVariance').value),showFusionDebug:document.getElementById('showFusionDebug').checked,btMsgType:parseInt(document.getElementById('btMsgType').value),btMsgFreqHz:parseInt(document.getElementById('btMsgFreqHz').value),useBaroOnly:document.getElementById('useBaroOnly').checked};document.getElementById('applyBtn').textContent='Applying...';fetch('/setparams',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(s)}).then(function(){document.getElementById('applyBtn').textContent='Apply'}).catch(function(){document.getElementById('applyBtn').textContent='Apply'})}setInterval(refreshStatus,2000);loadAllSettings()</script></body></html>)HTML";
 }
 
 void transmitBluetooth() {
@@ -642,16 +791,7 @@ void transmitBluetooth() {
         sprintf(message, "$LK8EX1,%.0f,%d,%d,%.0f,%d*", 
                 sensorData.pressurePa, altM, cps, sensorData.temperatureC, batteryPercent);
         
-        // Debug output to confirm fusion data  
-        FUSION_LOG("[FUSION] Alt=%.1fm, ClimbRate=%dcm/s, Pressure=%.0fPa\n", 
-                   sensorData.altitudeM, cps, sensorData.pressurePa);
-        
-        // Additional debug - show raw sensor values
-        static int debugCounter = 0;
-        if (debugCounter++ % 25 == 0) { // Every 5 seconds
-            FUSION_LOG("[DEBUG] PressureAlt=%.1fm, FusedAlt=%.1fm, IMU_active=%d\n", 
-                       pressureAltM, fusedAltitudeM, sensorFusionInitialized);
-        }
+        // Debug output removed to save space
                 
         uint8_t checksum = 0;
         for (int i = 1; message[i] != '*'; i++) {
@@ -694,18 +834,42 @@ void loop() {
     // Process serial commands for real-time tuning
     processSerialCommands();
     
-    // Check button for mode switching
+    // Handle web server requests
+    webServer.handleClient();
+    
+    // Check button for calibration (long press) or mode switching (short press)
+    static unsigned long buttonPressStart = 0;
+    static bool buttonWasPressed = false;
+
     if (BTN0()) {
-        delay(50); // Debounce
-        if (BTN0()) {
-            btMsgType = (btMsgType == BT_MSG_LK8EX1) ? BT_MSG_XCTRC : BT_MSG_LK8EX1;
-            Serial.print("Switched to ");
-            Serial.println((btMsgType == BT_MSG_LK8EX1) ? "LK8EX1" : "XCTRC");
-            
-            // Show LED indication for 5 seconds
-            setLedMode(btMsgType, 5000);
-            
-            while (BTN0()) delay(10); // Wait for release
+        if (!buttonWasPressed) {
+            buttonPressStart = millis();
+            buttonWasPressed = true;
+        } else {
+            // Check for long press (4 seconds)
+            if (millis() - buttonPressStart >= 4000) {
+                Serial.println("Long press detected - starting calibration");
+                performCalibration();
+                // Wait for button release
+                while (BTN0()) delay(10);
+                buttonWasPressed = false;
+                return; // Skip short press handling
+            }
+        }
+    } else {
+        // Button released
+        if (buttonWasPressed) {
+            unsigned long pressDuration = millis() - buttonPressStart;
+            if (pressDuration >= 50 && pressDuration < 4000) {
+                // Short press - switch BT message type
+                btMsgType = (btMsgType == BT_MSG_LK8EX1) ? BT_MSG_XCTRC : BT_MSG_LK8EX1;
+                Serial.print("Switched to ");
+                Serial.println((btMsgType == BT_MSG_LK8EX1) ? "LK8EX1" : "XCTRC");
+
+                // Show LED indication for 5 seconds
+                setLedMode(btMsgType, 5000);
+            }
+            buttonWasPressed = false;
         }
     }
     

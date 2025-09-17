@@ -185,6 +185,11 @@ int opt_init(void) {
           opt.misc.lcdContrast = atoi(pkeys[key].szValue);
          CLAMP(opt.misc.lcdContrast, LCD_CONTRAST_MIN, LCD_CONTRAST_MAX);
          }
+      else
+      if (!strcmp(pkeys[key].szName, "useBaroOnly")) {
+          opt.misc.useBaroOnly = atoi(pkeys[key].szValue);
+         CLAMP(opt.misc.useBaroOnly, USE_BARO_ONLY_MIN, USE_BARO_ONLY_MAX);
+         }
       }
    free (pkeys);
 
@@ -246,6 +251,7 @@ void opt_setDefaults() {
 	opt.misc.btMsgType = BT_MSG_LK8EX1;
 	opt.misc.btMsgFreqHz = BT_MSG_FREQ_HZ_DEFAULT;
 	opt.misc.lcdContrast = LCD_CONTRAST_DEFAULT;
+	opt.misc.useBaroOnly = USE_BARO_ONLY_DEFAULT;
    }
 
 
@@ -372,6 +378,10 @@ int opt_save() {
     sprintf(buf,"lcdContrast [%d,%d] %d\r\n", LCD_CONTRAST_MIN, LCD_CONTRAST_MAX, opt.misc.lcdContrast);
     nwrote = fdopt.print(buf);
     if (nwrote != strlen(buf)) return -25;
+
+    sprintf(buf,"useBaroOnly [%d,%d] %d\r\n", USE_BARO_ONLY_MIN, USE_BARO_ONLY_MAX, opt.misc.useBaroOnly);
+    nwrote = fdopt.print(buf);
+    if (nwrote != strlen(buf)) return -26;
     fdopt.close();
 
 #ifdef OPT_DEBUG

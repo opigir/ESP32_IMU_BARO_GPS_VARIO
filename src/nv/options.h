@@ -30,6 +30,7 @@ typedef struct MISC_PARAMS_ {
    int16_t  btMsgType;
    int16_t  btMsgFreqHz;
    int16_t  lcdContrast;
+   int16_t  useBaroOnly;
 } MISC_PARAMS;
 
 typedef struct OPTIONS_ {
@@ -41,7 +42,7 @@ typedef struct OPTIONS_ {
 
 extern OPTIONS opt;
 
-#define NUM_OPTIONS 21
+#define NUM_OPTIONS 22
 
 int opt_init(void);
 int opt_save(void);

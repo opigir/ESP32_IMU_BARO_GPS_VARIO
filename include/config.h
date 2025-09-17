@@ -67,9 +67,74 @@
 #define KF_ACCEL_VARIANCE_MAX                150
 
 // Vario thresholds in cm/sec for Bluetooth transmission
+#define VARIO_CLIMB_THRESHOLD_CPS_MIN       10
 #define VARIO_CLIMB_THRESHOLD_CPS_DEFAULT  	50
+#define VARIO_CLIMB_THRESHOLD_CPS_MAX       100
+
+#define VARIO_ZERO_THRESHOLD_CPS_MIN        (-20)
 #define VARIO_ZERO_THRESHOLD_CPS_DEFAULT  	5
+#define VARIO_ZERO_THRESHOLD_CPS_MAX        10
+
+#define VARIO_SINK_THRESHOLD_CPS_MIN        (-400)
 #define VARIO_SINK_THRESHOLD_CPS_DEFAULT  	(-250)
+#define VARIO_SINK_THRESHOLD_CPS_MAX        (-10)
+
+#define VARIO_CROSSOVER_CPS_MIN             300
+#define VARIO_CROSSOVER_CPS_DEFAULT         400
+#define VARIO_CROSSOVER_CPS_MAX             800
+
+#define VARIO_DISPLAY_IIR_MIN               90
+#define VARIO_DISPLAY_IIR_DEFAULT           95
+#define VARIO_DISPLAY_IIR_MAX               99
+
+// LCD backlight timing
+#define BACKLIT_SECS_MIN                    5
+#define BACKLIT_SECS_DEFAULT                30
+#define BACKLIT_SECS_MAX                    60
+
+// Track logging
+#define TRACK_START_THRESHOLD_M_MIN         0
+#define TRACK_START_THRESHOLD_M_DEFAULT     20
+#define TRACK_START_THRESHOLD_M_MAX         100
+
+#define TRACK_INTERVAL_SECS_MIN             1
+#define TRACK_INTERVAL_SECS_DEFAULT         3
+#define TRACK_INTERVAL_SECS_MAX             60
+
+// Navigation and sensor settings
+#define GLIDE_RATIO_IIR_MIN                 80
+#define GLIDE_RATIO_IIR_DEFAULT             90
+#define GLIDE_RATIO_IIR_MAX                 99
+
+#define GYRO_OFFSET_LIMIT_1000DPS_MIN       25
+#define GYRO_OFFSET_LIMIT_1000DPS_DEFAULT   150
+#define GYRO_OFFSET_LIMIT_1000DPS_MAX       200
+
+#define MAG_DECLINATION_DEG_MIN             (-60)
+#define MAG_DECLINATION_DEG_DEFAULT         0
+#define MAG_DECLINATION_DEG_MAX             60
+
+#define SPEAKER_VOLUME_MIN                  0
+#define SPEAKER_VOLUME_DEFAULT              2
+#define SPEAKER_VOLUME_MAX                  3
+
+#define WAYPOINT_RADIUS_M_MIN               5
+#define WAYPOINT_RADIUS_M_DEFAULT           50
+#define WAYPOINT_RADIUS_M_MAX               20000
+
+// Altitude display options
+#define ALTITUDE_DISPLAY_GPS    0
+#define ALTITUDE_DISPLAY_BARO   1
+
+// LCD contrast settings
+#define LCD_CONTRAST_MIN        1
+#define LCD_CONTRAST_MAX        10
+#define LCD_CONTRAST_DEFAULT    4
+
+// Barometer-only data transmission option
+#define USE_BARO_ONLY_MIN       0
+#define USE_BARO_ONLY_DEFAULT   0
+#define USE_BARO_ONLY_MAX       1
 
 // MS5611 altitude noise variance (measured offline)
 #define KF_Z_MEAS_VARIANCE            200

@@ -108,6 +108,7 @@ typedef struct {
         int logType;
         int trackIntervalSecs;
         int utcOffsetMins;
+        int useBaroOnly;
     } misc;
 } OPTIONS;
 

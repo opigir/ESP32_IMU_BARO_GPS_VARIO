@@ -3,6 +3,7 @@
 #include "config.h"
 #include "btmsg.h"
 #include "sensor/gps.h"
+#include "nv/options.h"
 #if USE_MS5611
 #include "sensor/ms5611.h"
 #endif
@@ -97,7 +98,9 @@ Field 4, battery voltage or charge percentage
 	Percentage should be 0 to 100, with no decimals, added by 1000!
 */
 void btmsg_genLK8EX1(char* szmsg, int32_t altm, int32_t cps, float batVoltage) {
-	sprintf(szmsg, "$LK8EX1,999999,%d,%d,99,%.1f*", altm, cps, batVoltage);
+	// Use barometer-only data if option is enabled, otherwise use provided climb rate
+	int32_t climbRate = opt.misc.useBaroOnly ? 9999 : cps;  // 9999 means vario not available (LK8 spec)
+	sprintf(szmsg, "$LK8EX1,999999,%d,%d,99,%.1f*", altm, climbRate, batVoltage);
 	uint8_t cksum = btmsg_nmeaChecksum(szmsg);
 	char szcksum[5];
 	sprintf(szcksum,"%02X\r\n", cksum);
@@ -128,10 +131,14 @@ void btmsg_genXCTRC(char* szmsg) {
 //	float courseDeg = ((float)NavPvt.nav.headingMotionDeg5)/100000.0f; not implemented on gps module, junk readings
 	float courseDeg = (float)GpsCourseHeadingDeg;
 #if USE_MS5611
-	sprintf(szmsg, "$XCTRC,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.2f,%.2f,%.1f,%.2f,,,,%.2f,%d*",year,month,day,hour,minute,second,centisecond,latDeg,lonDeg,altM,sogKph,courseDeg,KFClimbrateCps/100.0f, PaSample_MS5611/100.0f,batteryPercent);
+	// Use barometer-only data if option is enabled, otherwise use fusion data
+	float climbRate = opt.misc.useBaroOnly ? 0.0f : KFClimbrateCps/100.0f;
+	sprintf(szmsg, "$XCTRC,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.2f,%.2f,%.1f,%.2f,,,,%.2f,%d*",year,month,day,hour,minute,second,centisecond,latDeg,lonDeg,altM,sogKph,courseDeg,climbRate, PaSample_MS5611/100.0f,batteryPercent);
 #endif
 #if USE_BMP388
-	sprintf(szmsg, "$XCTRC,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.2f,%.2f,%.1f,%.2f,,,,%.2f,%d*",year,month,day,hour,minute,second,centisecond,latDeg,lonDeg,altM,sogKph,courseDeg,KFClimbrateCps/100.0f, PaSample_BMP388/100.0f,batteryPercent);
+	// Use barometer-only data if option is enabled, otherwise use fusion data
+	float climbRate = opt.misc.useBaroOnly ? 0.0f : KFClimbrateCps/100.0f;
+	sprintf(szmsg, "$XCTRC,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.2f,%.2f,%.1f,%.2f,,,,%.2f,%d*",year,month,day,hour,minute,second,centisecond,latDeg,lonDeg,altM,sogKph,courseDeg,climbRate, PaSample_BMP388/100.0f,batteryPercent);
 #endif
 	uint8_t cksum = btmsg_nmeaChecksum(szmsg);
 	char szcksum[5];
